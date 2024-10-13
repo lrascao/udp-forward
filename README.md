@@ -7,15 +7,22 @@ A dead simple Go (golang) package to forward UDP packets like a reverse NAT (i.e
 ```go
 package main
 
-import "github.com/1lann/udp-forward"
+import (
+    "github.com/lrascao/udp-forward"
+    "log/slog"
+)
 
 func main() {
-	// Forward(src, dst). It's asynchronous.
-	forwarder, err := forward.Forward("0.0.0.0:1000", "1.2.3.4:1023", forward.DefaultTimeout)
-	if err != nil {
-		panic(err)
-	}
-
+	forwarder, err := forward.NewForwarder("0.0.0.0:1000",
+		forward.WithDestination("target1", "1.2.3.4:1023"),
+		forward.WithTimeout(30*time.Second),
+		forward.WithConnectCallback(func(addr string) {
+			slog.Debug("connected", "from", addr)
+		}),
+		forward.WithDisconnectCallback(func(addr string) {
+			slog.Debug("disconnected", "from", addr)
+		}),
+	)
 	// Do something...
 
 	// Stop the forwarder
