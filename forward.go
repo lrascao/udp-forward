@@ -3,6 +3,7 @@ package forward
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -17,6 +18,12 @@ const (
 	// defaultTimeout is the default timeout period of inactivity for convenience
 	// sake. It is equivelant to 5 minutes.
 	defaultTimeout = time.Minute * 5
+)
+
+var (
+	// ErrNoDestinations is returned when there are no destinations to forward
+	// packets to.
+	ErrNoDestinations = errors.New("no destinations to forward packets to")
 )
 
 type connection struct {
@@ -271,7 +278,12 @@ func (f *forwarder) handle(ctx context.Context,
 		)
 
 		// pick out a random destination
-		dst := f.getDestination()
+		dst, err := f.getDestination()
+		if err != nil {
+			slog.Error("udp-forward: no destinations available", "err", err)
+			delete(f.connections, from.String())
+			return
+		}
 
 		if dst.addr.IP.To4()[0] == 127 {
 			slog.Debug("using local listener")
@@ -279,7 +291,7 @@ func (f *forwarder) handle(ctx context.Context,
 		}
 
 		slog.Debug("dialing", "dst", dst.String())
-		udpConn, err := net.DialUDP("udp", laddr, dst.addr)
+		udpConn, err = net.DialUDP("udp", laddr, dst.addr)
 		if err != nil {
 			slog.Error("udp-forward: failed to dial", err)
 			delete(f.connections, from.String())
@@ -360,11 +372,15 @@ func (f *forwarder) handle(ctx context.Context,
 	}
 }
 
-func (f *forwarder) getDestination() destination {
+func (f *forwarder) getDestination() (destination, error) {
 	f.dstMutex.RLock()
 	defer f.dstMutex.RUnlock()
 
-	return f.dst[rand.Intn(len(f.dst))]
+	if len(f.dst) == 0 {
+		return destination{}, ErrNoDestinations
+	}
+
+	return f.dst[rand.Intn(len(f.dst))], nil
 }
 
 func (d destination) Name() string {
