@@ -1,3 +1,3 @@
 module github.com/lrascao/udp-forward
 
-go 1.22.5
+go 1.24.4
