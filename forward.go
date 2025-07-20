@@ -38,7 +38,7 @@ type Forwarder interface {
 	Close()
 	Connected() []string
 	Update(...Option) error
-	Destinations() []net.UDPAddr
+	Destinations() []Destination
 }
 
 type Destination interface {
