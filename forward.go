@@ -166,12 +166,11 @@ func (f *forwarder) Start(ctx context.Context) {
 
 		n, _, _, from, err := f.listenerConn.ReadMsgUDP(buf, oob)
 		if err != nil {
-			slog.Error("forward: failed to read, terminating", err)
+			slog.Error("forward: failed to read, terminating", "error", err)
 			return
 		}
-		ctx, cancel := context.WithCancel(ctx)
 
-		go f.handle(ctx, cancel, buf[:n], from)
+		go f.handle(ctx, buf[:n], from)
 	}
 }
 
@@ -255,13 +254,16 @@ func (f *forwarder) janitor() {
 }
 
 func (f *forwarder) handle(ctx context.Context,
-	cancel context.CancelFunc,
 	data []byte,
 	from *net.UDPAddr,
 ) {
 	f.connectionsMutex.Lock()
 	conn, found := f.connections[from.String()]
 	if !found {
+		// Only create a cancel context for new connections;
+		// the janitor uses it to signal inactivity timeout.
+		ctx, cancel := context.WithCancel(ctx)
+		_ = ctx // used implicitly via the cancel stored in connection
 		f.connections[from.String()] = &connection{
 			available:  make(chan struct{}),
 			udp:        nil,
@@ -281,7 +283,12 @@ func (f *forwarder) handle(ctx context.Context,
 		dst, err := f.getDestination()
 		if err != nil {
 			slog.Error("udp-forward: no destinations available", "err", err)
-			delete(f.connections, from.String())
+			f.connectionsMutex.Lock()
+			if c, ok := f.connections[from.String()]; ok {
+				c.cancel()
+				delete(f.connections, from.String())
+			}
+			f.connectionsMutex.Unlock()
 			return
 		}
 
@@ -293,8 +300,13 @@ func (f *forwarder) handle(ctx context.Context,
 		slog.Debug("dialing", "dst", dst.String())
 		udpConn, err = net.DialUDP("udp", laddr, dst.addr)
 		if err != nil {
-			slog.Error("udp-forward: failed to dial", err)
-			delete(f.connections, from.String())
+			slog.Error("udp-forward: failed to dial", "error", err)
+			f.connectionsMutex.Lock()
+			if c, ok := f.connections[from.String()]; ok {
+				c.cancel()
+				delete(f.connections, from.String())
+			}
+			f.connectionsMutex.Unlock()
 			return
 		}
 
@@ -307,7 +319,7 @@ func (f *forwarder) handle(ctx context.Context,
 		f.connectCallback(from.String())
 
 		if _, _, err := udpConn.WriteMsgUDP(data, nil, nil); err != nil {
-			slog.Error("udp-forward: error sending initial packet to client", err)
+			slog.Error("udp-forward: error sending initial packet to client", "error", err)
 		}
 
 		for {
@@ -347,7 +359,7 @@ func (f *forwarder) handle(ctx context.Context,
 	// log.Println("sent packet to server", conn.udp.RemoteAddr())
 	_, _, err := conn.udp.WriteMsgUDP(data, nil, nil)
 	if err != nil {
-		slog.Error("udp-forward: error sending packet to server:", err)
+		slog.Error("udp-forward: error sending packet to server", "error", err)
 	}
 
 	shouldChangeTime := false
