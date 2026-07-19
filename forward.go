@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 const (
@@ -131,6 +134,15 @@ func NewForwarder(src string, args ...Option) (*forwarder, error) {
 		return nil, err
 	}
 
+	// Ask the kernel to report each datagram's original destination
+	// address (IP_PKTINFO / IPV6_RECVPKTINFO) so replies can be sourced
+	// from it. On a multihomed host behind DNAT the kernel would
+	// otherwise pick the reply source by route, which breaks the NAT
+	// state on the way back. One of the two calls fails depending on
+	// the socket family; that is fine.
+	_ = ipv4.NewPacketConn(listenerConn).SetControlMessage(ipv4.FlagDst|ipv4.FlagInterface, true)
+	_ = ipv6.NewPacketConn(listenerConn).SetControlMessage(ipv6.FlagDst|ipv6.FlagInterface, true)
+
 	f := &forwarder{
 		connectCallback:    func(addr string) {},
 		disconnectCallback: func(addr string) {},
@@ -164,13 +176,13 @@ func (f *forwarder) Start(ctx context.Context) {
 		buf := make([]byte, bufferSize)
 		oob := make([]byte, bufferSize)
 
-		n, _, _, from, err := f.listenerConn.ReadMsgUDP(buf, oob)
+		n, oobn, _, from, err := f.listenerConn.ReadMsgUDP(buf, oob)
 		if err != nil {
 			slog.Error("forward: failed to read, terminating", "error", err)
 			return
 		}
 
-		go f.handle(ctx, buf[:n], from)
+		go f.handle(ctx, buf[:n], from, replyControl(oob[:oobn]))
 	}
 }
 
@@ -256,6 +268,7 @@ func (f *forwarder) janitor() {
 func (f *forwarder) handle(ctx context.Context,
 	data []byte,
 	from *net.UDPAddr,
+	replyOOB []byte,
 ) {
 	f.connectionsMutex.Lock()
 	conn, found := f.connections[from.String()]
@@ -346,7 +359,7 @@ func (f *forwarder) handle(ctx context.Context,
 				return
 			}
 
-			if _, _, err := f.listenerConn.WriteMsgUDP(buf[:n], nil, from); err != nil {
+			if _, _, err := f.listenerConn.WriteMsgUDP(buf[:n], replyOOB, from); err != nil {
 				slog.Error("udp-forward: error sending packet to client", "error", err)
 			}
 		}
@@ -382,6 +395,22 @@ func (f *forwarder) handle(ctx context.Context,
 		}
 		f.connectionsMutex.Unlock()
 	}
+}
+
+// replyControl derives, from a received datagram's control data, the
+// control message that pins the reply's source to the address the
+// datagram was originally sent to. Returns nil (kernel picks the
+// source, the previous behavior) when no packet info is available.
+func replyControl(oob []byte) []byte {
+	var cm4 ipv4.ControlMessage
+	if err := cm4.Parse(oob); err == nil && cm4.Dst != nil {
+		return (&ipv4.ControlMessage{Src: cm4.Dst, IfIndex: cm4.IfIndex}).Marshal()
+	}
+	var cm6 ipv6.ControlMessage
+	if err := cm6.Parse(oob); err == nil && cm6.Dst != nil {
+		return (&ipv6.ControlMessage{Src: cm6.Dst, IfIndex: cm6.IfIndex}).Marshal()
+	}
+	return nil
 }
 
 func (f *forwarder) getDestination() (destination, error) {
